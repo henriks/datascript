@@ -20,6 +20,7 @@
    :wildcard? (:wildcard? pattern)
    :specs     (-> pattern :attrs seq)
    :results   (transient [])
+   :missing   (transient #{})
    :kvps      (transient {})
    :eids      eids
    :multi?    multi?
@@ -33,10 +34,12 @@
   [frame eids kvps]
   (let [pattern (:pattern frame)]
     (assoc frame
-           :eids      eids
+           :eids      (rest eids)
            :specs     (seq (:attrs pattern))
            :wildcard? (:wildcard? pattern)
            :kvps      (transient {})
+           :missing   (cond-> (:missing frame)
+                        (empty? (dissoc kvps :db/id)) (conj! [(:attr frame) (first eids)]))
            :results   (cond-> (:results frame)
                         (seq kvps) (conj! kvps)))))
 
@@ -75,7 +78,7 @@
 (defn- pull-recursion-frame
   [db [frame & frames]]
   (if-let [eids (seq (:eids frame))]
-    (let [frame  (reset-frame frame (rest eids) (recursion-result frame))
+    (let [frame  (reset-frame frame eids (recursion-result frame))
           eid    (first eids)]
       (or (pull-seen-eid frame frames eid)
           (conj frames frame (recursion-frame frame eid))))
@@ -241,7 +244,7 @@
               new-frames (conj frames (assoc frame :specs (rest specs)))]
           (pull-attr db spec (first eids) new-frames))
         (->> frame :kvps persistent! not-empty
-             (reset-frame frame (rest eids))
+             (reset-frame frame eids)
              (conj frames)
              (recur db))))
     (conj frames (assoc frame :state :done))))
@@ -255,13 +258,15 @@
     :recursion  (recur db (pull-recursion-frame db frames))
     :done       (let [[f & remaining] frames
                       result (cond-> (persistent! (:results f))
-                               (not (:multi? f)) first)]
+                               (not (:multi? f)) first)
+                      missing (persistent! (:missing f))]
                   (if (seq remaining)
                     (->> (cond-> (first remaining)
-                           result (update :kvps assoc! (:attr f) result))
+                           result (update :kvps assoc! (:attr f) result)
+                           (seq missing) (update :missing #(reduce conj! % missing)))
                          (conj (rest remaining))
                          (recur db))
-                    result))))
+                    (with-meta result {:missing missing})))))
 
 (defn pull-spec
   [db pattern eids multi?]
